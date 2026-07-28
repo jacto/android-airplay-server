@@ -1,0 +1,36 @@
+name: Build Debug APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Use JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "21"
+          cache: "gradle"
+
+      - name: Build Debug
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Upload native libs
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-libs
+          path: app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
