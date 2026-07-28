@@ -437,11 +437,16 @@ static inline std::unique_ptr<Decoder> makeDecoder(int ct, int spf, int sampleRa
         return nullptr;
     }
     if (AMediaCodec *codec = startAacCodec(ct, spf, sampleRate, channels, log,
-                                           realtimePriority, lowLatency)) {
-        return std::make_unique<MediaCodecDecoder>(codec, timeline, lat);
+                                       realtimePriority, lowLatency)) {
+     return std::make_unique<MediaCodecDecoder>(codec, timeline, lat);
     }
-    log.error("AAC codec init failed (ct=%d)", ct);
+    log.info("AAC: hardware failed, trying FFmpeg software decoder (ct=%d)", ct);
+    if (auto sw = FfmpegAacDecoder::make(ct, spf, sampleRate, channels, timeline, lat, log)) {
+        log.info("AAC: software decoder (ffmpeg) started (ct=%d)", ct);
+        return sw;
+    }
+    log.error("AAC codec init failed (hw and sw, ct=%d)", ct);
     return nullptr;
-}
+    }
 
 #endif  // AUDIO_DECODER_H
