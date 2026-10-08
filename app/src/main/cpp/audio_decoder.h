@@ -26,6 +26,7 @@ extern "C" {
 
 #include "audio_time.h"
 #include "log_sink.h"
+#include "tee_buffer.h"
 #include "timeline_buffer.h"
 
 static constexpr int CT_ALAC = 2, CT_AAC_LC = 4, CT_AAC_ELD = 8;
