@@ -406,4 +406,21 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioDebug(
     jlong cap = env->GetDirectBufferCapacity(buf);
     if (!addr || cap <= 0) return JNI_FALSE;
     return audio_engine_get_debug(ctx->cb_ctx.audio_engine, addr, (size_t)cap) ? JNI_TRUE : JNI_FALSE;
+/* drain the audio tee tap (mixer pull model): copies up to out.length/2 stereo-interleaved
+ * 44100 Hz int16 frames; returns frame count (0 = nothing buffered right now) */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeServerAudioReadTee(
+        JNIEnv *env, jobject thiz, jlong handle, jshortArray out) {
+    server_ctx_t *ctx = (server_ctx_t *)(intptr_t)handle;
+    if (!ctx || !ctx->cb_ctx.audio_engine || !out) return 0;
+    const jsize cap = env->GetArrayLength(out);
+    if (cap < 2) return 0;
+    jshort *elems = env->GetShortArrayElements(out, NULL);
+    if (!elems) return 0;
+    const size_t n = audio_engine_read_tee(ctx->cb_ctx.audio_engine,
+                                           (int16_t *)elems, (int)(cap / 2));
+    env->ReleaseShortArrayElements(out, elems, 0);
+    return (jint)n;
+}
 }
