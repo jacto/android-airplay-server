@@ -162,8 +162,9 @@ static inline void buildAlacAtomCookie(uint8_t out[36], int sampleRate, int chan
 class MediaCodecDecoder : public Decoder {
 public:
     // takes ownership of already-created+started codec
-    MediaCodecDecoder(AMediaCodec *codec, TimelineBuffer &timeline, LatencyReporter &lat)
-        : mCodec(codec), mTimeline(timeline), mLat(lat) {
+    MediaCodecDecoder(AMediaCodec *codec, TimelineBuffer &timeline, LatencyReporter &lat,
+                      TeeBuffer *tee = nullptr)
+        : mCodec(codec), mTimeline(timeline), mLat(lat), mTee(tee) {
         mDrainRun.store(true, std::memory_order_relaxed);
         mDrainThread = std::thread(&MediaCodecDecoder::drainLoop, this);
     }
@@ -202,9 +203,10 @@ private:
             size_t osz = 0;
             uint8_t *out = AMediaCodec_getOutputBuffer(mCodec, (size_t)oi, &osz);
             if (out && info.size > 0) {
-                mTimeline.write((const int16_t *)(out + info.offset),
-                                (size_t)info.size / sizeof(int16_t),  // bytes -> samples
-                                (int64_t)info.presentationTimeUs * 1000);
+                const int16_t *pcm = (const int16_t *)(out + info.offset);
+                const size_t samples = (size_t)info.size / sizeof(int16_t);
+                mTimeline.write(pcm, samples, (int64_t)info.presentationTimeUs * 1000);
+                if (mTee) mTee->write(pcm, samples / 2);  // decoded-content tap for mixer path
             }
             const int64_t nowNs = monoNs();
             AMediaCodec_releaseOutputBuffer(mCodec, (size_t)oi, false);
@@ -217,6 +219,7 @@ private:
     AMediaCodec *mCodec;                  // owned
     TimelineBuffer &mTimeline;            // not owned
     LatencyReporter &mLat;                // not owned
+    TeeBuffer *mTee = nullptr;            // not owned, optional decoded-content tap
     LatencyProbe mProbe;
     std::thread mDrainThread;
     std::atomic<bool> mDrainRun{false};   // drain thread stop signal
@@ -241,9 +244,9 @@ public:
     // returns nullptr if codec can't be created/opened
     static std::unique_ptr<FfmpegAlacDecoder> make(int sampleRate, int channels, int spf,
                                                    TimelineBuffer &timeline, LatencyReporter &lat,
-                                                   LogSink &log) {
+                                                   LogSink &log, TeeBuffer *tee = nullptr) {
         installFfmpegLogcat();
-        auto dec = std::unique_ptr<FfmpegAlacDecoder>(new FfmpegAlacDecoder(timeline, lat, log));
+        auto dec = std::unique_ptr<FfmpegAlacDecoder>(new FfmpegAlacDecoder(timeline, lat, log, tee));
         if (!dec->init(sampleRate, channels, spf)) return nullptr;
         return dec;
     }
@@ -276,6 +279,7 @@ public:
             if (mFrame->format == AV_SAMPLE_FMT_S16) {
                 // this branch is not used as current libavcodec decoder cannot produce AV_SAMPLE_FMT_S16
                 mTimeline.write((const int16_t *)mFrame->data[0], (size_t)n * mChannels, pts);
+                if (mTee) mTee->write((const int16_t *)mFrame->data[0], (size_t)n);
             } else if (mFrame->format == AV_SAMPLE_FMT_S16P) {
                 // timeline expects packed/interleaved (AV_SAMPLE_FMT_S16), decoder gives planar
                 if (mPcm.size() < (size_t)n * mChannels) mPcm.resize((size_t)n * mChannels);
@@ -284,6 +288,7 @@ public:
                     for (int i = 0; i < n; i++) mPcm[(size_t)i * mChannels + c] = p[i];
                 }
                 mTimeline.write(mPcm.data(), (size_t)n * mChannels, pts);
+                if (mTee) mTee->write(mPcm.data(), (size_t)n);
             } else {
                 mLog.error("ffmpeg ALAC: unsupported sample format %d", mFrame->format);
                 return false;
@@ -297,8 +302,9 @@ public:
     }
 
 private:
-    FfmpegAlacDecoder(TimelineBuffer &timeline, LatencyReporter &lat, LogSink &log)
-        : mTimeline(timeline), mLat(lat), mLog(log) {}
+    FfmpegAlacDecoder(TimelineBuffer &timeline, LatencyReporter &lat, LogSink &log,
+                      TeeBuffer *tee = nullptr)
+        : mTimeline(timeline), mLat(lat), mLog(log), mTee(tee) {}
 
     bool init(int sampleRate, int channels, int spf) {
         const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_ALAC);
@@ -340,6 +346,7 @@ private:
     TimelineBuffer &mTimeline;
     LatencyReporter &mLat;
     LogSink &mLog;
+    TeeBuffer *mTee = nullptr;      // not owned, optional decoded-content tap
     int mChannels;
 };
 
@@ -349,9 +356,9 @@ class FfmpegAacDecoder : public Decoder {
 public:
     static std::unique_ptr<FfmpegAacDecoder> make(int ct, int spf, int sampleRate, int channels,
                                                    TimelineBuffer &timeline, LatencyReporter &lat,
-                                                   LogSink &log) {
+                                                   LogSink &log, TeeBuffer *tee = nullptr) {
         installFfmpegLogcat();
-        auto dec = std::unique_ptr<FfmpegAacDecoder>(new FfmpegAacDecoder(timeline, lat, log));
+        auto dec = std::unique_ptr<FfmpegAacDecoder>(new FfmpegAacDecoder(timeline, lat, log, tee));
         if (!dec->init(ct, spf, sampleRate, channels)) return nullptr;
         return dec;
     }
@@ -387,8 +394,10 @@ public:
                         for (int i = 0; i < n; i++) mPcm[(size_t)i * mChannels + c] = p[i];
                     }
                     mTimeline.write(mPcm.data(), (size_t)n * mChannels, pts);
+                    if (mTee) mTee->write(mPcm.data(), (size_t)n);
                 } else {
                     mTimeline.write((const int16_t *)mFrame->data[0], (size_t)n * mChannels, pts);
+                    if (mTee) mTee->write((const int16_t *)mFrame->data[0], (size_t)n);
                 }
             } else if (mFrame->format == AV_SAMPLE_FMT_FLTP || mFrame->format == AV_SAMPLE_FMT_FLT) {
                 // FFmpeg AAC may output float; convert to S16
@@ -411,6 +420,7 @@ public:
                     }
                 }
                 mTimeline.write(mPcm.data(), (size_t)n * mChannels, pts);
+                if (mTee) mTee->write(mPcm.data(), (size_t)n);
             } else {
                 mLog.error("ffmpeg AAC: unsupported sample format %d", mFrame->format);
                 return false;
@@ -424,8 +434,9 @@ public:
     }
 
 private:
-    FfmpegAacDecoder(TimelineBuffer &timeline, LatencyReporter &lat, LogSink &log)
-        : mTimeline(timeline), mLat(lat), mLog(log) {}
+    FfmpegAacDecoder(TimelineBuffer &timeline, LatencyReporter &lat, LogSink &log,
+                     TeeBuffer *tee = nullptr)
+        : mTimeline(timeline), mLat(lat), mLog(log), mTee(tee) {}
 
     bool init(int ct, int spf, int sampleRate, int channels) {
         const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_AAC);
@@ -475,6 +486,7 @@ private:
     TimelineBuffer &mTimeline;
     LatencyReporter &mLat;
     LogSink &mLog;
+    TeeBuffer *mTee = nullptr;      // not owned, optional decoded-content tap
     int mChannels;
 };
 
@@ -555,16 +567,17 @@ static inline AMediaCodec *startAlacHwCodec(int sampleRate, int channels, int sp
 static inline std::unique_ptr<Decoder> makeDecoder(int ct, int spf, int sampleRate, int channels,
                                                    TimelineBuffer &timeline, LatencyReporter &lat,
                                                    LogSink &log, bool forceSwAlac,
-                                                   bool realtimePriority, bool lowLatency) {
+                                                   bool realtimePriority, bool lowLatency,
+                                                   TeeBuffer *tee = nullptr) {
     if (ct == CT_ALAC) {
         if (!forceSwAlac) {
             if (AMediaCodec *codec = startAlacHwCodec(sampleRate, channels, spf, log,
                                                       realtimePriority, lowLatency)) {
                 log.info("ALAC: hardware decoder");
-                return std::make_unique<MediaCodecDecoder>(codec, timeline, lat);
+                return std::make_unique<MediaCodecDecoder>(codec, timeline, lat, tee);
             }
         }
-        if (auto sw = FfmpegAlacDecoder::make(sampleRate, channels, spf, timeline, lat, log)) {
+        if (auto sw = FfmpegAlacDecoder::make(sampleRate, channels, spf, timeline, lat, log, tee)) {
             log.info("ALAC: software decoder (ffmpeg)%s", forceSwAlac ? " (forced)" : "");
             return sw;
         }
@@ -573,12 +586,12 @@ static inline std::unique_ptr<Decoder> makeDecoder(int ct, int spf, int sampleRa
     }
     if (AMediaCodec *codec = startAacCodec(ct, spf, sampleRate, channels, log,
                                            realtimePriority, lowLatency)) {
-        return std::make_unique<MediaCodecDecoder>(codec, timeline, lat);
+        return std::make_unique<MediaCodecDecoder>(codec, timeline, lat, tee);
     }
     // AAC hardware decoder failed (e.g. HarmonyOS lacks c2.android.inproc.aac.decoder)
     // Fall back to FFmpeg software AAC decoder (same pattern as ALAC fallback)
     log.info("AAC: hardware failed, trying FFmpeg software decoder (ct=%d)", ct);
-    if (auto sw = FfmpegAacDecoder::make(ct, spf, sampleRate, channels, timeline, lat, log)) {
+    if (auto sw = FfmpegAacDecoder::make(ct, spf, sampleRate, channels, timeline, lat, log, tee)) {
         log.info("AAC: software decoder (ffmpeg) started (ct=%d)", ct);
         return sw;
     }
