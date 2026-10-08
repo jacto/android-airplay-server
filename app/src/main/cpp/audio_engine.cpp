@@ -16,6 +16,7 @@
 #include "audio_decoder.h"
 #include "audio_output.h"
 #include "log_sink.h"
+#include "tee_buffer.h"
 #include "timeline_buffer.h"
 
 /*
@@ -72,6 +73,7 @@ struct AudioEngine {
     bool start() {
         std::lock_guard<std::mutex> lk(mRebuildLock);
         mRunning = true;
+        if (mTee) mTee->flush();  // stale backlog from a previous session must not leak
         if (mOutput && !mOutputActive) {
             mTimeline->flushAndReprime();
             mOutputActive = mOutput->start();
@@ -123,6 +125,15 @@ struct AudioEngine {
         return true;
     }
 
+    // JNI drain thread: never blocks on rebuild (try_lock; contention is a sub-ms
+    // config swap, caller retries on next mixer pull ~21ms later)
+    size_t readTee(int16_t *dst, int maxFrames) {
+        std::unique_lock<std::mutex> lk(mRebuildLock, std::try_to_lock);
+        if (!lk.owns_lock()) return 0;
+        if (!mTee) return 0;
+        return mTee->read(dst, (size_t)maxFrames);
+    }
+
     // touches decoder: must not run concurrently with stop()
     void decode(const uint8_t *data, size_t len, int ct, int64_t ptsNs) {
         if (!mTimeline) return;
@@ -147,7 +158,8 @@ struct AudioEngine {
             mDecoder = {ct, wantConfig,
                         makeDecoder(ct, wantConfig.spf, mSampleRate, mChannels, *mTimeline,
                                     mDecLatency, *mLog, mApplied->forceSwAlac,
-                                    mApplied->realtimePriority, mApplied->lowLatency)};
+                                    mApplied->realtimePriority, mApplied->lowLatency,
+                                    mTee.get())};
             mRetryAtNs = mDecoder.decoder ? 0 : monoNs() + DECODER_RETRY_NS;
             // codec switch is definitely a discontinuity
             mTimeline->reanchorTracker();
@@ -170,6 +182,9 @@ private:
         mDecLatency.setEnableLogging(cfg.benchmarkLog);
         mTimeline = std::make_shared<TimelineBuffer>(mSampleRate, mChannels,
                                                      cfg.staticCushionMs, cfg.percentilePct);
+        // tee taps the DECODER output (content rate, network-paced supply for the
+        // Java mixer path); 16384 frames (~371ms@44.1k) headroom for RAOP bursts
+        mTee = std::make_shared<TeeBuffer>(16384);
         mOutput = AudioOutput::create(mSampleRate, mChannels, cfg.oboeBufferFrames,
                                       cfg.lowLatency, mTimeline, mLog);
         mOutput->setVolume(mVolume);  // carry current level across rebuild
@@ -188,6 +203,7 @@ private:
     std::mutex mRebuildLock;
     std::shared_ptr<TimelineBuffer> mTimeline; // guarded by mRebuildLock
     std::shared_ptr<AudioOutput> mOutput;      // guarded by mRebuildLock
+    std::shared_ptr<TeeBuffer> mTee;           // guarded by mRebuildLock (decoder-side tap ring)
     bool mRunning = false;                     // requested output state, guarded by mRebuildLock
     bool mOutputActive = false;                // actual output state, guarded by mRebuildLock
     float mVolume = 1.0f;                      // last-set output level, guarded by mRebuildLock
@@ -244,6 +260,11 @@ void audio_engine_set_volume(AudioEngine *engine, float volume) {
 
 void audio_engine_on_format(AudioEngine *engine, int ct, int spf) {
     if (engine) engine->onFormat(ct, spf);
+}
+
+size_t audio_engine_read_tee(AudioEngine *engine, int16_t *dst, int maxFrames) {
+    if (!engine || !dst || maxFrames <= 0) return 0;
+    return engine->readTee(dst, (size_t)maxFrames);
 }
 
 bool audio_engine_start(AudioEngine *engine) {
