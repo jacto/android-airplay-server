@@ -5,11 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* drain the audio tee tap: up to maxFrames stereo-interleaved int16 frames copied into
- * dst (44100 Hz stereo, pre-volume). returns frames copied; 0 on nothing buffered or
- * transient rebuild contention. engine output continues unaffected (this is a copy). */
-size_t audio_engine_read_tee(AudioEngine *engine, int16_t *dst, int maxFrames);
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -53,19 +48,20 @@ void audio_engine_destroy(AudioEngine *engine);
 /* decode + play one encoded airplay packet; not concurrent with audio_engine_destroy */
 void audio_engine_decode(AudioEngine *engine, const uint8_t *data, int len, int ct, int64_t pts_ns);
 
-/* drain the audio tee tap: up to maxFrames stereo-interleaved int16 frames copied into
- * dst (44100 Hz stereo, pre-volume). returns frames copied; 0 on nothing buffered or
- * transient rebuild contention. engine output continues unaffected (this is a copy). */
-size_t audio_engine_read_tee(AudioEngine *engine, int16_t *dst, int maxFrames);
-
 #ifdef __cplusplus
 }
 
 #include <memory>
+#include <cstdint>
 
 /* create engine; handle or NULL */
 extern "C++" AudioEngine *audio_engine_create(std::shared_ptr<LogSink> log, int sampleRate,
                                               int channels);
+
+/* drain the audio tee tap: up to maxFrames stereo-interleaved int16 frames copied into
+ * dst (44100 Hz stereo, pre-volume). returns frames copied; 0 on nothing buffered or
+ * transient rebuild contention. engine output continues unaffected (this is a copy). */
+extern "C++" size_t audio_engine_read_tee(AudioEngine *engine, int16_t *dst, int maxFrames);
 #endif
 
 #endif  // AUDIO_ENGINE_H
