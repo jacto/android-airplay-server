@@ -61,7 +61,7 @@ extern "C++" AudioEngine *audio_engine_create(std::shared_ptr<LogSink> log, int 
 /* drain the audio tee tap: up to maxFrames stereo-interleaved int16 frames copied into
  * dst (44100 Hz stereo, pre-volume). returns frames copied; 0 on nothing buffered or
  * transient rebuild contention. engine output continues unaffected (this is a copy). */
-extern "C++" size_t audio_engine_read_tee(AudioEngine *engine, int16_t *dst, int maxFrames);
+extern "C" size_t audio_engine_read_tee(AudioEngine *engine, int16_t *dst, int maxFrames);
 #endif
 
 #endif  // AUDIO_ENGINE_H
